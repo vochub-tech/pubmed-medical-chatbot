@@ -1,162 +1,146 @@
 #!/usr/bin/env node
 /**
- * Medical Chatbot POC
+ * Medical Chatbot - Patient-Friendly Q&A
  * 
- * Simple chatbot that:
- * 1. Takes a user question about a disease
- * 2. Searches PubMed for relevant articles
- * 3. Uses an LLM to synthesize an answer from the articles
+ * Full pipeline chatbot that:
+ * 1. Takes natural language patient questions
+ * 2. Maps to MeSH terms using QuickUMLS integration
+ * 3. Searches PubMed for relevant articles
+ * 4. Synthesizes plain English answers using LLM
  * 
  * Usage:
- *   node src/chatbot.js
- *   echo "What are the treatments for MEN1?" | node src/chatbot.js
+ *   node src/chatbot.js                    # Interactive mode
+ *   echo "What causes tremors?" | node src/chatbot.js
+ *   PROVIDER=anthropic node src/chatbot.js # Use Anthropic
  */
 
-import { searchByDisease } from './pubmed-client.js';
 import { createInterface } from 'readline';
+import { processPatientQuery } from './quickumls-mapper.js';
+import { searchPubMed, fetchDetails } from './pubmed-client.js';
+import { synthesizeAnswer, validateConfig } from './llm-synthesis.js';
 
-// Simple disease name extraction from questions
-function extractDiseaseName(question) {
-  // Common patterns for disease questions
-  const patterns = [
-    /what (?:are|is) (?:the )?(?:treatment|cause|symptom|diagnosis|prognosis).* (?:for|of) (.+?)\??$/i,
-    /how (?:to |do you )?(?:treat|diagnose|prevent) (.+?)\??$/i,
-    /tell me about (.+?)(?:'s| treatment| symptoms| causes)?\??$/i,
-    /(?:treatment|causes?|symptoms?) (?:of|for) (.+?)\??$/i,
-    /what (?:causes?|is) (.+?)\??$/i,
-    /(.+?) (?:treatment|symptoms|causes|diagnosis)\??$/i,
-  ];
+/**
+ * Main answer function - full pipeline
+ */
+async function answerQuestion(question, options = {}) {
+  const {
+    provider = process.env.LLM_PROVIDER || process.env.PROVIDER || 'openai',
+    maxArticles = 5,
+    verbose = false,
+  } = options;
 
-  for (const pattern of patterns) {
-    const match = question.match(pattern);
-    if (match) {
-      return match[1].trim();
-    }
+  console.log('\n🔍 Analyzing your question...\n');
+
+  // Step 1: Map patient language to MeSH terms
+  if (verbose) console.log('📝 Step 1: Mapping to medical terms...');
+  const processed = await processPatientQuery(question);
+  
+  if (processed.mapping.mappedTerms.length > 0) {
+    console.log(`📋 Found relevant medical terms: ${processed.mapping.mappedTerms.slice(0, 3).map(t => t.meshTerm).join(', ')}`);
+  } else {
+    console.log('📋 Using original query for search');
   }
 
-  // Fallback: use the whole question as the search term
-  return question.replace(/\?/g, '').trim();
-}
-
-// Format articles for context
-function formatArticlesForContext(articles) {
-  return articles.map((article, i) => `
-[Article ${i + 1}]
-Title: ${article.title}
-Authors: ${article.authors?.slice(0, 3).join(', ') || 'N/A'}
-Journal: ${article.journal} (${article.pubDate})
-PMID: ${article.pmid}
-MeSH Terms: ${article.meshTerms?.slice(0, 5).join(', ') || 'N/A'}
-
-Abstract:
-${article.abstract || 'No abstract available'}
-`).join('\n---\n');
-}
-
-// Generate a prompt for the LLM
-function generatePrompt(question, articles) {
-  const context = formatArticlesForContext(articles);
+  // Step 2: Search PubMed
+  if (verbose) console.log('\n📚 Step 2: Searching PubMed...');
+  console.log('📚 Searching medical literature...\n');
   
-  return `You are a medical information assistant. Based on the following PubMed articles, answer the user's question. 
-
-Important guidelines:
-- Only provide information that is supported by the articles below
-- Cite the relevant PMID when making claims
-- If the articles don't contain relevant information, say so
-- Include a disclaimer that this is for informational purposes only
-- Be accurate and cite sources
-
-ARTICLES FROM PUBMED:
-${context}
-
-USER QUESTION: ${question}
-
-Please provide a helpful, evidence-based response:`;
-}
-
-// Main chatbot function
-async function answerQuestion(question) {
-  console.log('\n🔍 Analyzing question...\n');
+  const pmids = await searchPubMed(processed.pubmedQuery, { maxResults: maxArticles });
   
-  // Extract disease name from question
-  const disease = extractDiseaseName(question);
-  console.log(`📋 Detected topic: "${disease}"`);
-  
-  // Search PubMed
-  console.log('📚 Searching PubMed...\n');
-  const results = await searchByDisease(disease, {
-    maxResults: 5,
-    includeAbstracts: true,
-    recentYears: 5, // Focus on recent research
-  });
-
-  if (results.articles.length === 0) {
+  if (pmids.length === 0) {
     return {
-      answer: `I couldn't find any recent PubMed articles about "${disease}". Please try rephrasing your question or using a different disease name.`,
-      sources: [],
-      query: results.query,
+      answer: `I couldn't find any relevant research articles for "${question}". Try rephrasing your question or using different terms.`,
+      articles: [],
+      mapping: processed.mapping,
     };
   }
 
-  console.log(`Found ${results.articles.length} relevant articles\n`);
+  const articles = await fetchDetails(pmids);
+  console.log(`Found ${articles.length} relevant article(s)\n`);
 
-  // Generate the LLM prompt
-  const prompt = generatePrompt(question, results.articles);
+  // Step 3: Synthesize answer using LLM
+  if (verbose) console.log('🤖 Step 3: Synthesizing answer...');
   
-  // For the POC, we'll output the prompt and articles
-  // In production, this would call an LLM API
-  const synthesizedAnswer = synthesizeBasicAnswer(question, results.articles);
+  const llmConfig = validateConfig();
+  if (!llmConfig.ready) {
+    console.log('⚠️  No LLM API configured. Showing basic summary.\n');
+    return buildBasicResponse(question, articles, processed.mapping);
+  }
+
+  console.log(`🤖 Generating patient-friendly answer (${provider})...\n`);
+  
+  const synthesis = await synthesizeAnswer(question, articles, {
+    provider,
+    includeDisclaimer: true,
+    maxArticles,
+  });
 
   return {
-    answer: synthesizedAnswer,
-    sources: results.articles.map(a => ({
-      title: a.title,
-      pmid: a.pmid,
-      url: a.pubmedUrl,
-      journal: a.journal,
-    })),
-    query: results.query,
-    llmPrompt: prompt, // For integration with actual LLM
+    answer: synthesis.answer,
+    citations: synthesis.citations,
+    confidence: synthesis.confidence,
+    mapping: processed.mapping,
+    metadata: synthesis.metadata,
   };
 }
 
-// Basic answer synthesis (without LLM - for POC demo)
-function synthesizeBasicAnswer(question, articles) {
-  const topArticle = articles[0];
-  
-  let answer = `Based on ${articles.length} recent PubMed articles about this topic:\n\n`;
-  
-  // Summarize key points from abstracts
-  answer += `**Key Research Findings:**\n\n`;
-  
+/**
+ * Basic response when LLM is not available
+ */
+function buildBasicResponse(question, articles, mapping) {
+  let answer = `Based on ${articles.length} research article(s):\n\n`;
+
+  // Show key findings from abstracts
+  answer += '**Key Research Findings:**\n\n';
   for (const article of articles.slice(0, 3)) {
     if (article.abstract) {
-      // Extract first 1-2 sentences from abstract
-      const sentences = article.abstract.split(/\. /).slice(0, 2).join('. ');
-      answer += `• ${sentences}. (PMID: ${article.pmid})\n\n`;
+      const firstSentence = article.abstract.split(/\. /)[0];
+      answer += `• ${firstSentence}. [PMID: ${article.pmid}]\n\n`;
     }
   }
-  
-  answer += `\n**Sources:**\n`;
+
+  // Show sources
+  answer += '**Sources:**\n';
   for (const article of articles) {
-    answer += `- ${article.title} (${article.journal}, ${article.pubDate}) - ${article.pubmedUrl}\n`;
+    answer += `- ${article.title} (${article.journal}, ${article.pubDate})\n`;
+    answer += `  ${article.pubmedUrl}\n`;
   }
-  
-  answer += `\n⚠️ **Disclaimer:** This information is from research articles for educational purposes only. Consult a healthcare provider for medical advice.`;
-  
-  return answer;
+
+  answer += '\n⚠️ **Disclaimer:** This information is for educational purposes only. Consult a healthcare provider for medical advice.';
+
+  return {
+    answer,
+    articles,
+    mapping,
+    confidence: 0.5,
+    metadata: { provider: 'basic' },
+  };
 }
 
-// Interactive REPL mode
+/**
+ * Interactive REPL mode
+ */
 async function runInteractive() {
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
   });
 
-  console.log('\n🏥 Medical Chatbot POC');
-  console.log('Ask questions about diseases and get answers based on PubMed research.');
-  console.log('Type "quit" to exit.\n');
+  console.log('\n🏥 Medical Research Chatbot');
+  console.log('━'.repeat(50));
+  console.log('Ask questions about medical conditions and get');
+  console.log('evidence-based answers from PubMed research.\n');
+  
+  // Show LLM status
+  const llmStatus = validateConfig();
+  if (llmStatus.ready) {
+    console.log(`✅ ${llmStatus.message}\n`);
+  } else {
+    console.log('⚠️  No LLM API key found. Running in basic mode.');
+    console.log('   Set OPENAI_API_KEY or ANTHROPIC_API_KEY for full features.\n');
+  }
+  
+  console.log('Type "quit" to exit, "help" for examples.\n');
 
   const askQuestion = () => {
     rl.question('You: ', async (input) => {
@@ -168,18 +152,30 @@ async function runInteractive() {
       }
       
       if (question.toLowerCase() === 'quit' || question.toLowerCase() === 'exit') {
-        console.log('\nGoodbye!');
+        console.log('\nGoodbye! Stay healthy. 👋\n');
         rl.close();
+        return;
+      }
+
+      if (question.toLowerCase() === 'help') {
+        showHelp();
+        askQuestion();
         return;
       }
 
       try {
         const result = await answerQuestion(question);
+        console.log('━'.repeat(50));
         console.log('\n📖 Answer:\n');
         console.log(result.answer);
-        console.log('\n' + '─'.repeat(60) + '\n');
+        
+        if (result.confidence !== undefined) {
+          console.log(`\n📊 Confidence: ${(result.confidence * 100).toFixed(0)}%`);
+        }
+        
+        console.log('\n' + '━'.repeat(50) + '\n');
       } catch (error) {
-        console.error(`\nError: ${error.message}\n`);
+        console.error(`\n❌ Error: ${error.message}\n`);
       }
 
       askQuestion();
@@ -189,9 +185,33 @@ async function runInteractive() {
   askQuestion();
 }
 
-// Check if running from pipe or interactive
+function showHelp() {
+  console.log(`
+📚 Example Questions:
+━━━━━━━━━━━━━━━━━━━━
+• "What causes Parkinson's disease?"
+• "My hands shake when I'm nervous - what could it be?"
+• "What are the treatments for type 2 diabetes?"
+• "How is breast cancer diagnosed?"
+• "What are the symptoms of MEN1?"
+
+💡 Tips:
+• Use plain language - I'll translate to medical terms
+• Be specific about symptoms or conditions
+• Ask about treatments, causes, symptoms, or diagnosis
+
+⚙️ Environment Variables:
+• LLM_PROVIDER=openai|anthropic (default: openai)
+• OPENAI_API_KEY - for OpenAI synthesis
+• ANTHROPIC_API_KEY - for Anthropic synthesis
+`);
+}
+
+/**
+ * Main entry point
+ */
 async function main() {
-  // Check if stdin is a TTY (interactive) or piped
+  // Check if running interactively or with piped input
   if (process.stdin.isTTY) {
     await runInteractive();
   } else {
@@ -208,7 +228,7 @@ async function main() {
         console.log('\n📖 Answer:\n');
         console.log(result.answer);
         
-        // Also output JSON for programmatic use
+        // Output JSON if requested
         if (process.env.JSON_OUTPUT) {
           console.log('\n---JSON---\n');
           console.log(JSON.stringify(result, null, 2));

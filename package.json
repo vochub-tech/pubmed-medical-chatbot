@@ -1,16 +1,35 @@
 {
   "name": "pubmed-medical-chatbot",
-  "version": "0.1.0",
-  "description": "Medical chatbot POC using PubMed MCP for disease article search",
+  "version": "0.2.0",
+  "description": "Medical chatbot using PubMed, QuickUMLS mapping, and LLM synthesis for patient-friendly answers",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "mcp": "node src/mcp-server.js",
     "search": "node src/cli-search.js",
-    "chat": "node src/chatbot.js"
+    "chat": "node src/chatbot.js",
+    "test": "node --test test/*.test.js",
+    "test:mapper": "node test/test-mapper.js",
+    "test:llm": "node test/test-llm.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "pubmed",
+    "medical",
+    "chatbot",
+    "mcp",
+    "quickumls",
+    "mesh",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vochub-tech/pubmed-medical-chatbot"
   }
 }
