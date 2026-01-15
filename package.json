@@ -1,0 +1,16 @@
+{
+  "name": "pubmed-medical-chatbot",
+  "version": "0.1.0",
+  "description": "Medical chatbot POC using PubMed MCP for disease article search",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "mcp": "node src/mcp-server.js",
+    "search": "node src/cli-search.js",
+    "chat": "node src/chatbot.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
