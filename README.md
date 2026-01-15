@@ -1,6 +1,10 @@
 # PubMed Medical Chatbot POC
 
+[![GitHub Repo](https://img.shields.io/badge/vochub--tech/pubmed--medical--chatbot-blue)](https://github.com/vochub-tech/pubmed-medical-chatbot)
+
 A proof-of-concept medical chatbot that searches PubMed articles by disease using MeSH terms and E-utilities API.
+
+**Related Project:** [grll/pubmedmcp](https://github.com/grll/pubmedmcp) - Python MCP server that this project can integrate with for article fetching.
 
 ## Features
 
